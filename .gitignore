@@ -7,7 +7,4 @@ venv/
 .idea/
 .DS_Store
 *.log
-currency_dbt/target/
-currency_dbt/dbt_packages/
-currency_dbt/logs/
 fx_daily.csv
