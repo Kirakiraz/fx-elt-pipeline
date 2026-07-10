@@ -148,7 +148,7 @@ The backbone is engine-agnostic. The modeling, transformation tooling, and stora
 | Testing | — | dbt tests + `dbt_utils` |
 | Linting | SQLFluff | — |
 
-**Data source:** base **USD**, quotes ⟨THB · JPY · EUR · GBP · SGD⟩. Provider pinned to ECB to keep the series consistent. The ECB doesn't publish on weekends/holidays, so the pipeline tolerates non-continuous date coverage: the real gaps are missing *dates*, not currency pairs.
+**Data source:** ECB exchange rates with **USD** as the base currency and **THB, JPY, EUR, GBP, and SGD** as target currencies. The ECB is used as the sole data provider to maintain a consistent historical series. Since the ECB does not publish rates on weekends or public holidays, gaps in the data represent missing dates rather than missing currency pairs.
 
 ---
 
