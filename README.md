@@ -20,6 +20,10 @@ FX rates make a good case study for this: a daily cadence, a naturally increment
 
 ---
 
+**Quick nav:** [Architecture](#architecture) · [Engineering Decisions](#engineering-decisions) · [Tech Stack](#tech-stack) · [How to Run](#how-to-run) · [Data Models](#data-models) · [Evolution & Roadmap](#project-evolution--roadmap) · [Structure](#project-structure)
+
+---
+
 ## Architecture
 
 Two independent pipelines, same medallion shape (raw → staging → mart), different engine underneath. They don't chain into each other. They're the *same* ELT built on two storage engines so the modeling trade-offs sit side by side.
@@ -142,7 +146,7 @@ The backbone is engine-agnostic. The modeling, transformation tooling, and stora
 | Transformation | SQL, executed in-database | dbt (`dbt-bigquery`) |
 | Data source | [Frankfurter API](https://frankfurter.dev) (ECB provider) | same |
 | Testing | — | dbt tests + `dbt_utils` |
-| Linting | SQLFluff | SQLFluff |
+| Linting | SQLFluff | — |
 
 **Data source:** base **USD**, quotes ⟨THB · JPY · EUR · GBP · SGD⟩. Provider pinned to ECB to keep the series consistent. The ECB doesn't publish on weekends/holidays, so the pipeline tolerates non-continuous date coverage: the real gaps are missing *dates*, not currency pairs.
 
