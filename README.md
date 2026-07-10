@@ -1,153 +1,246 @@
-# currency-api-v2
+# fx-elt-pipeline
 
-An incremental **ELT pipeline** that ingests foreign-exchange rates from the Frankfurter API into PostgreSQL, following a **medallion architecture** (raw → staging → mart). Transformation logic lives in SQL and runs inside the database, not in the application layer.
+![Python](https://img.shields.io/badge/Python-3776AB?style=flat&logo=python&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat&logo=postgresql&logoColor=white)
+![BigQuery](https://img.shields.io/badge/BigQuery-669DF6?style=flat&logo=googlebigquery&logoColor=white)
+![dbt](https://img.shields.io/badge/dbt-FF694B?style=flat&logo=dbt&logoColor=white)
 
-> **Why ELT?** It keeps raw data immutable and replayable, pushes all transformation into version-controlled SQL, and mirrors how modern warehouses (BigQuery, Snowflake) are built.
+**A daily FX ELT pipeline, re-architected from PostgreSQL to BigQuery + dbt.
+Exploring how the same pipeline changes when the storage engine changes.**
 
-**Status:** Complete. Loads raw → staging → two parallel marts (denormalized OBT + dimensional star schema).
+Medallion architecture (raw → staging → mart), with data quality tests, source definitions, and generated lineage documentation. Moving from a row-oriented database to a columnar analytical warehouse changes how data should be modeled, transformed, and consumed.
 
----
+**Stack:** BigQuery · dbt · PostgreSQL · Python · SQL · medallion architecture · dimensional modeling
 
-## Who is this for?
+FX rates make a good case study for this: a daily cadence, a naturally incremental series, and metrics like moving averages and volatility that map to real decisions like timing currency exposure. That shape is what gives the modeling decisions weight; each one answers to how the data behaves and gets used, not just to what the tools can do.
 
-Models what an **import/export or procurement team** needs: track daily FX rates with day-over-day change, moving averages, and volatility to support decisions like *"lock the cost in baht now or wait?"* and to gauge currency risk.
+> **Why rebuild instead of starting a new project?**
+> Rather than spin up a separate BigQuery project, I rebuilt the same ELT pipeline to see which parts of the design carry over and which need to change when moving from PostgreSQL to BigQuery.
+> The interesting part was understanding why the **same** FX data is modeled as a dimensional **star schema** on PostgreSQL (row-store), but as a wide **One Big Table (OBT)** on BigQuery (columnar). **Same data. Different engine. Different modeling decisions.**
 
 ---
 
 ## Architecture
 
+Two independent pipelines, same medallion shape (raw → staging → mart), different engine underneath. They don't chain into each other. They're the *same* ELT built on two storage engines so the modeling trade-offs sit side by side.
+
+**PostgreSQL (row-store)**
+
 ```mermaid
 flowchart LR
-    A[Frankfurter API v2<br/>ECB provider] -->|fetch USD base rates| B
+    API[Frankfurter API<br/>USD base] --> R
 
-    subgraph PostgreSQL
-        B[raw.api_response<br/><i>JSONB blob, append-only</i>]
-        C[staging.stg_exchange_rate<br/><i>flat, typed, deduplicated</i>]
-        D[mart.fx_daily<br/><i>OBT: window-function metrics</i>]
-        F[mart.fact_exchange_rate<br/><i>star: raw rate + FKs</i>]
-        G[mart.dim_date]
-        H[mart.dim_currency]
+    subgraph PostgreSQL["PostgreSQL (row-store)"]
+        R[raw.api_response<br/><i>JSONB, append-only</i>]
+        S[staging.stg_exchange_rate<br/><i>flat, typed, deduped</i>]
+        OBT[mart.fx_daily<br/><i>OBT: window metrics</i>]
+        F[mart.fact_exchange_rate<br/><i>star: rate + FKs</i>]
+        DD[mart.dim_date]
+        DC[mart.dim_currency]
 
-        B -->|unnest + dedup| C
-        C -->|window functions| D
-        C -->|load raw rate| F
-        G -.->|FK| F
-        H -.->|FK base/target| F
+        R -->|unnest + dedup| S
+        S -->|window functions| OBT
+        S -->|load rate| F
+        DD -.FK.-> F
+        DC -.FK base/target.-> F
     end
-
-    D --> E[Analytics-ready<br/>FX metrics]
-    F --> E
 ```
 
-| Layer | Table | Role |
-|-------|-------|------|
-| **Raw** | `raw.api_response` | Unmodified JSON payload as `JSONB`, append-only — full replay and audit. |
-| **Staging** | `staging.stg_exchange_rate` | Flat, typed rows. Deduplicated with `ROW_NUMBER()`, upserted via `ON CONFLICT` on the natural key. |
-| **Mart — OBT** | `mart.fx_daily` | Wide table: prev-day rate, daily % change, 7/30-day moving averages, 30-day volatility. No joins needed. |
-| **Mart — Star** | `mart.fact_exchange_rate` | Fact holding raw `rate` only, FKs to `dim_date` and `dim_currency` (role-playing: base + target). |
-| **Dimension** | `mart.dim_date` | Calendar dimension generated with `generate_series`. |
-| **Dimension** | `mart.dim_currency` | ISO 4217 reference; natural key (`CHAR(3)`), seeded as static data. |
+**BigQuery + dbt (columnar)**
+
+```mermaid
+flowchart LR
+    API[Frankfurter API<br/>USD base] --> R
+
+    subgraph BigQuery["BigQuery (columnar + dbt)"]
+        R[raw_api_response<br/><i>native JSON, append-only</i>]
+        S["stg_exchange_rate<br/><i>dbt view</i>"]
+        OBT["fx_daily<br/><i>dbt table: window metrics</i>"]
+
+        R -->|"unnest + dedup (dbt)"| S
+        S -->|"window functions (dbt)"| OBT
+    end
+```
+
+Same three layers map to different objects on each engine:
+
+| Layer | PostgreSQL | BigQuery + dbt |
+|-------|-----------|----------------|
+| **Raw** | `raw.api_response` (JSONB) | `raw_api_response` (native JSON) |
+| **Staging** | `staging.stg_exchange_rate` | `stg_exchange_rate` (dbt view) |
+| **Mart** | `mart.fx_daily` (OBT) + `mart.fact_exchange_rate` (star) | `fx_daily` (dbt table, OBT) |
+
+The asymmetry in the mart row is the point: PostgreSQL carries both a star schema and an OBT, BigQuery carries only an OBT. *Why* is covered in [Engineering Decisions](#engineering-decisions).
+
+![dbt lineage graph: raw → staging → mart](docs/lineage.png)
 
 ---
 
-## Why two marts?
+## Engineering Decisions
 
-`fx_daily` (OBT) and the star schema are **parallel marts**, both built from staging — neither derives from the other:
+The data didn't change between versions. The engine did, and that's what drove every decision below.
 
-- **`fx_daily`** — one wide table, no joins, fast for BI. Rigid: new angles need schema changes.
-- **Star schema** — `fact_exchange_rate` keeps only the raw `rate`; derived metrics stay out by design (they're computed across rows, not additive at the fact's grain). Flexible to slice via dimensions.
+### Why a star schema on PostgreSQL but an OBT on BigQuery?
 
-Showing both patterns on one source is intentional. In a production warehouse where the fact is the central source of truth, a derived layer like `fx_daily` would be built *from* the fact rather than alongside it.
+The same dataset is modeled two different ways, not because the requirements changed, but because the engine did. The difference isn't stylistic; it's how each engine executes analytical queries.
 
-A few specifics worth noting: `dim_currency` keys on the **ISO 4217 code** (immutable, single-source) rather than a surrogate; `fact_exchange_rate` references `dim_currency` **twice** (base + target) as a role-playing dimension; and FK constraints enforce integrity, so loads need no manual validation joins.
+**PostgreSQL (row-store).** Rows are stored together and joins to small dimensions are cheap, so a dimensional star schema fits: `fact_exchange_rate` holds the raw `rate`, with `dim_date` and `dim_currency` around it. The payoff is flexibility: new ways to slice the data don't require reshaping the fact.
+
+**BigQuery (columnar).** Only the columns a query touches get scanned, so a wide table costs nothing for the columns you ignore, while joins carry more relative cost. A wide table plays to how the engine reads data, so a single **One Big Table** (`fx_daily`) fits better than a star. It helps that `dim_currency` here is tiny and attribute-poor (just a currency code), so there's little to normalize out into a dimension anyway.
+
+**Trade-off.** The OBT is rigid: a new metric means a schema change, not just a new query against dimensions. At this scale that's an acceptable cost, and on a columnar engine it's the shape that pays off. Same data, different engine, different right answer.
+
+### Why store raw JSON instead of flattening on ingestion?
+
+The problem with transforming during ingestion is that you lose the original: if the transform logic changes later, there's nothing to re-derive from without re-calling the API.
+
+So both pipelines land the untouched API payload first (`JSONB` on Postgres, native `JSON` on BigQuery) before any transformation. Raw stays immutable and replayable; everything downstream of raw can be rebuilt from stored payload when logic changes, without re-ingesting the source. It also keeps ingestion and transformation cleanly separated. The extract step just lands data, and all shaping happens later in SQL.
+
+**Trade-off.** Storing raw JSON costs more space than landing pre-flattened rows, and every downstream read pays a parse step. At this data scale both are negligible next to the replayability.
+
+### Why move transformations into dbt?
+
+The Postgres version runs transformation as SQL scripts, sequenced by hand in `main.py`. That works while there are a few steps. Rebuilding on BigQuery, the transformation layer had enough dependencies that ordering them manually stopped being the right approach: the pipeline needed to understand its own shape.
+
+dbt addresses this directly:
+
+- **`ref()` builds the DAG:** dbt reads dependencies between models and runs them in order, so nothing is sequenced by hand.
+- **Tests as config:** `not_null`, `accepted_values`, and a composite-grain uniqueness check (`dbt_utils.unique_combination_of_columns`) run against the marts on every build.
+- **Lineage for free:** `dbt docs generate` produces the source → staging → mart graph above.
+
+**Trade-off.** dbt adds a dependency and a project structure to learn, overhead a couple of SQL scripts don't have. It earns that back the moment the DAG has more than a couple of nodes or the models need testing.
+
+### Why views for staging but tables for marts?
+
+Not every layer is worth storing. The question for each one is whether recomputing it on demand is cheaper than materializing it.
+
+Staging mostly standardizes and dedupes raw, so it's a **view** (no stored intermediate, always current). The mart runs window functions (moving averages, volatility) that are more expensive to recompute, so it's a **table**, computed once, cached.
+
+**Trade-off.** Incremental materialization was deliberately skipped. At this data scale a full rebuild is cheaper than the complexity of managing incremental state, and BigQuery Sandbox has no DML to run a `MERGE` anyway, so incremental wasn't even on the table here.
+
+### What stayed the same, and what didn't
+
+The engine changed; the fundamentals didn't. Keeping the same backbone across both builds is what made the differences meaningful rather than incidental:
+
+| Carried over | Changed |
+|--------------|---------|
+| Medallion architecture (raw → staging → mart) | Star schema → One Big Table |
+| Raw-first, immutable ingestion | Hand-sequenced SQL → dbt DAG |
+| ELT pattern (transform in-warehouse) | `JSONB` → native `JSON` |
+| Incremental ingestion concept | Manual testing → dbt tests + lineage |
+
+The backbone is engine-agnostic. The modeling, transformation tooling, and storage details are where a columnar warehouse pulls the design in a different direction than a row-store.
 
 ---
 
 ## Tech Stack
 
-| Concern | Choice |
-|---------|--------|
-| Language | Python 3 (`requests`, `SQLAlchemy`, `python-dotenv`, `logging`) |
-| Database | PostgreSQL |
-| Data source | [Frankfurter API v2](https://frankfurter.dev) (ECB provider) |
-| Transformation | SQL (executed in-database) |
-| Linting | SQLFluff |
+| Concern | PostgreSQL pipeline | BigQuery pipeline |
+|---------|--------------------|--------------------|
+| Language | Python 3 (`requests`, `SQLAlchemy`, `python-dotenv`, `logging`) | same extract, dbt for transform |
+| Storage | PostgreSQL | BigQuery (Sandbox) |
+| Transformation | SQL, executed in-database | dbt (`dbt-bigquery`) |
+| Data source | [Frankfurter API](https://frankfurter.dev) (ECB provider) | same |
+| Testing | — | dbt tests + `dbt_utils` |
+| Linting | SQLFluff | SQLFluff |
 
----
-
-## Data Source Notes
-
-- **Base:** USD &nbsp;·&nbsp; **Quotes:** THB, JPY, EUR, GBP, SGD
-- **Provider pinned to ECB** to avoid blended-rate drift across central banks and keep the series consistent.
-- **The real gap is missing _dates_, not currency pairs.** The ECB doesn't publish on weekends/holidays, so the pipeline tolerates non-continuous date coverage.
+**Data source:** base **USD**, quotes ⟨THB · JPY · EUR · GBP · SGD⟩. Provider pinned to ECB to keep the series consistent. The ECB doesn't publish on weekends/holidays, so the pipeline tolerates non-continuous date coverage: the real gaps are missing *dates*, not currency pairs.
 
 ---
 
 ## How to Run
 
-**Prerequisites:** Python 3.10+, a running PostgreSQL instance, and `psql` on your PATH (`psql --version` to check).
-> On Windows, `psql` often isn't on PATH — add `C:\Program Files\PostgreSQL\<version>\bin`, then open a new terminal.
+### PostgreSQL pipeline
+
+**Prerequisites:** Python 3.10+, a running PostgreSQL instance, `psql` on PATH.
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/Kirakiraz/currency-api-v2.git
-cd currency-api-v2
+git clone https://github.com/Kirakiraz/fx-elt-pipeline.git
+cd fx-elt-pipeline
 pip install -r requirements.txt
 
-# 2. Configure — copy the example and fill in DB credentials
-cp .env.example .env
+cp .env.example .env            # fill in DB credentials
 
-# 3. Build schema + seed data (one-time). Run from the repo root.
 createdb -U <your_user> currency_db
-psql -U <your_user> -d currency_db -f init.sql
+psql -U <your_user> -d currency_db -f init.sql   # run from repo root
 
-# 4. Run the pipeline
 python main.py
 ```
 
-- Replace `<your_user>` with your PostgreSQL user (often `postgres`), matching `.env`.
-- **Run step 3 from the repo root** — `init.sql` resolves relative `\i` paths (`sql/ddl/`, `sql/seed/`) from your current directory.
+### BigQuery + dbt
+
+The dbt build runs against a BigQuery project and isn't meant to be reproduced end to end (it needs your own GCP project + auth). The workflow, for reference:
+
+```bash
+dbt deps                        # install dbt_utils
+dbt run                         # build stg (view) → fx_daily (table)
+dbt test                        # run data-quality tests
+dbt docs generate && dbt docs serve   # build + view lineage graph
+```
 
 ---
 
-## Design Decisions
+## Data Models
 
-- **ELT over ETL** — raw lands first; transforms run in SQL, immutable and reproducible.
-- **JSONB raw layer** — downstream logic can be re-derived without re-calling the API.
-- **Incremental loading** — `get_last_loaded_date()` reads the max `source_date` in staging, so each run pulls only new data.
-- **Idempotent upserts** — `ON CONFLICT` on natural keys means re-running never duplicates rows.
+### Star schema (PostgreSQL)
 
-(Mart modeling choices — parallel marts, natural keys, role-playing dimension — are covered in *Why two marts?*.)
+`fact_exchange_rate` holds one row per (`date_key`, base, target) at the grain of a single observed rate, keeping only the raw `rate`. Derived metrics stay out by design, since they're computed across rows and aren't additive at the fact's grain.
+
+- **`dim_date`** is a calendar dimension generated with `generate_series` (2020–2030). The fact joins to it on an integer **`date_key`** (`YYYYMMDD`) rather than a raw date: the standard star-schema surrogate.
+- **`dim_currency`** keys on the **ISO 4217 code** (immutable, single source) rather than a surrogate, a natural key that's already stable. Referenced **twice** by the fact (base + target), a role-playing dimension.
+- FK constraints on both keys enforce integrity, so loads don't need manual validation joins.
+
+### OBT (both engines)
+
+`fx_daily` is a single wide table with the derived metrics precomputed per row:
+
+- previous-day rate (`LAG`)
+- day-over-day % change
+- 7-day and 30-day moving averages
+- 30-day volatility (rolling `STDDEV`)
+
+No joins at query time. The trade-off is rigidity: a new metric means a schema change, not just a new query against dimensions.
+
+On BigQuery this is the *only* mart. On PostgreSQL it sits alongside the star schema, built in parallel from staging, neither derives from the other.
 
 ---
 
-## Future Improvements
+## Project Evolution & Roadmap
 
-- **Cloud migration** — port to BigQuery (partition the fact by date) and add scheduled orchestration (Cloud Composer / Airflow) in place of manual runs.
-- **Incremental staging** — the staging step re-processes the full raw table each run; `load_to_raw()` returns the new `raw.id`, which can scope the transform to new rows.
-- **Data quality checks** — automated validation (row counts, null checks, rate bounds) between layers.
-- **Tests** — `pytest` coverage for the extract/load functions.
+```
+PostgreSQL ELT  →  BigQuery + dbt  →  Airflow orchestration
+   (done)              (done)              (next)
+```
+
+- **PostgreSQL:** the original build, medallion ELT, star schema + OBT marts, idempotent upserts.
+- **BigQuery + dbt:** re-architected for a columnar engine: native JSON raw, dbt models, tests, lineage docs.
+- **Airflow (next):** a single DAG to orchestrate extract → dbt run → test, replacing manual runs. Kept minimal (via Docker/Astro) to stay in scope.
+
+**Other improvements on the list:**
+
+- **Incremental staging:** staging currently re-processes the full raw table each run; scoping to new rows would cut redundant work.
+- **Expanded data-quality checks:** row-count reconciliation and rate-bound checks between layers.
+- **`pytest`:** coverage for the Python extract/load functions.
 
 ---
 
 ## Project Structure
 
 ```
-currency-api-v2/
-├── sql/
-│   ├── ddl/
-│   │   └── schema.sql                  # CREATE all schemas/tables (run once)
-│   ├── seed/
-│   │   ├── dim_date.sql                # generate calendar dimension
-│   │   └── dim_currency.sql            # static ISO 4217 reference data
-│   └── transform/
-│       ├── stg_exchange_rate.sql       # unnest + dedup raw → staging
-│       ├── fx_daily.sql                # window-function metrics → OBT mart
-│       └── fact_exchange_rate.sql      # raw rate → star schema fact
-├── init.sql                            # orchestrator: \i ddl + seed
-├── main.py                             # fetch + load + run SQL transforms
+fx-elt-pipeline/
+├── sql/                          # PostgreSQL pipeline
+│   ├── ddl/schema.sql
+│   ├── seed/                     # dim_date, dim_currency
+│   └── transform/                # stg, fx_daily, fact_exchange_rate
+├── currency_dbt/                 # BigQuery + dbt project
+│   ├── models/
+│   │   ├── staging/
+│   │   └── marts/                # fx_daily + _schema.yml (tests)
+│   ├── dbt_project.yml
+│   └── packages.yml
+├── docs/                         # lineage screenshot, diagrams
+├── init.sql                      # Postgres orchestrator (\i ddl + seed)
+├── main.py                       # extract + load + run transforms
 ├── requirements.txt
-├── .env.example
-├── .sqlfluff
-└── .gitignore
+└── .env.example
 ```
