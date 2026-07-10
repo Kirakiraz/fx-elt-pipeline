@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: fx_daily
+    description: "Daily FX rates (OBT) with LAG, 7/30-day MA, and volatility. Grain: one row per source_date × base × target."
+    columns:
+      - name: source_date
+        description: "Rate observation date from the API."
+        data_tests: [not_null]
+      - name: base_currency
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['USD']
+      - name: target_currency
+        data_tests: [not_null]
+      - name: rate
+        data_tests: [not_null]
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [source_date, base_currency, target_currency]

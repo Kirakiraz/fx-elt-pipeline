@@ -7,4 +7,7 @@ venv/
 .idea/
 .DS_Store
 *.log
+logs/
+# data dumps
 fx_daily.csv
+raw.jsonl

@@ -1,0 +1,7 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: fx_dataset
+    tables:
+      - name: raw_api_response
