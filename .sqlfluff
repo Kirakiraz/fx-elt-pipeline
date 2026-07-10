@@ -1,10 +1,10 @@
 [sqlfluff]
 dialect = postgres
-sql_file_exts = .sql,.py
+sql_file_exts = .sql
 
 [sqlfluff:indentation]
 tab_space_size = 4
 indent_unit = space
 
 [sqlfluff:ignore]
-path = .venv/, venv/, env/, __pycache__/
+path = .venv /, venv /, env /, __pycache__/
