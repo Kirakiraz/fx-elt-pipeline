@@ -50,6 +50,9 @@ def main():
         transform_to_staging(engine)
         logger.info("✓ Staging complete")
 
+        transform_to_fx_daily(engine)
+        logger.info("✓ Mart: fx_daily (OBT) upsert complete")
+
         transform_to_fact(engine)
         logger.info("✓ Mart: fact_exchange_rate (star) upsert complete")
 
@@ -140,6 +143,20 @@ def transform_to_staging(engine) -> None:
         result = conn.execute(text(staging_sql))
         conn.commit()
     logger.info(f"staging upsert done ({result.rowcount} rows affected)")
+
+# ============================================================
+# Transform: staging → mart.fx_daily (denormalized OBT, window-function metrics)
+# ============================================================
+
+
+def transform_to_fx_daily(engine) -> None:
+    with open(SQL_DIR / "transform" / "fx_daily.sql", "r", encoding="utf-8") as f:
+        fx_daily_sql = f.read()
+
+    with engine.connect() as conn:
+        result = conn.execute(text(fx_daily_sql))
+        conn.commit()
+    logger.info(f"fx_daily upsert done ({result.rowcount} rows affected)")
 
 # ============================================================
 # Transform: staging → mart.fact_exchange_rate (star schema fact, raw rate only)
