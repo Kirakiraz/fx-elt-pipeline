@@ -20,4 +20,5 @@ SELECT
     extract(WEEK FROM datum)::INT AS week_of_year,
     extract(ISODOW FROM datum)::INT AS day_of_week,
     to_char(datum, 'TMDay') AS day_name
-FROM raw_date_series;
+FROM raw_date_series
+ON CONFLICT (date_key) DO NOTHING;
