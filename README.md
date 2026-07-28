@@ -37,13 +37,11 @@ flowchart LR
     subgraph PostgreSQL["PostgreSQL (row-store)"]
         R[raw.api_response<br/><i>JSONB, append-only</i>]
         S[staging.stg_exchange_rate<br/><i>flat, typed, deduped</i>]
-        OBT[mart.fx_daily<br/><i>OBT: window metrics</i>]
         F[mart.fact_exchange_rate<br/><i>star: rate + FKs</i>]
         DD[mart.dim_date]
         DC[mart.dim_currency]
 
         R -->|unnest + dedup| S
-        S -->|window functions| OBT
         S -->|load rate| F
         DD -.FK.-> F
         DC -.FK base/target.-> F
@@ -72,9 +70,9 @@ Same three layers map to different objects on each engine:
 |-------|-----------|----------------|
 | **Raw** | `raw.api_response` (JSONB) | `raw_api_response` (native JSON) |
 | **Staging** | `staging.stg_exchange_rate` | `stg_exchange_rate` (dbt view) |
-| **Mart** | `mart.fx_daily` (OBT) + `mart.fact_exchange_rate` (star) | `fx_daily` (dbt table, OBT) |
+| **Mart** | `mart.fact_exchange_rate` (star) | `fx_daily` (dbt table, OBT) |
 
-The asymmetry in the mart row is the point: PostgreSQL carries both a star schema and an OBT, BigQuery carries only an OBT. *Why* is covered in [Engineering Decisions](#engineering-decisions).
+Each engine ends up with one mart design, not two: PostgreSQL as a dimensional star schema, BigQuery as a wide OBT. *Why* is covered in [Engineering Decisions](#engineering-decisions).
 
 ![dbt lineage graph: raw → staging → mart](docs/lineage.png)
 
@@ -194,7 +192,13 @@ dbt docs generate && dbt docs serve   # build + view lineage graph
 - **`dim_currency`** keys on the **ISO 4217 code** (immutable, single source) rather than a surrogate, a natural key that's already stable. Referenced **twice** by the fact (base + target), a role-playing dimension.
 - FK constraints on both keys enforce integrity, so loads don't need manual validation joins.
 
-### OBT (both engines)
+### Serving view (PostgreSQL)
+
+`mart.vw_fx_metrics` sits on top of `fact_exchange_rate` as the layer the DA queries directly. Rather than have consumers read the raw fact, the view gives them a clean, ready-to-use surface — a small serving boundary between the modeled mart and whoever consumes it. It reads from the **fact**, not staging, so the serving layer stays downstream of the mart rather than reaching around it.
+
+It exposes the derived FX metrics (previous-day rate, day-over-day % change, 7- and 30-day moving averages, 30-day volatility) as a compute-on-read view.
+
+### OBT (BigQuery)
 
 `fx_daily` is a single wide table with the derived metrics precomputed per row:
 
@@ -205,26 +209,28 @@ dbt docs generate && dbt docs serve   # build + view lineage graph
 
 No joins at query time. The trade-off is rigidity: a new metric means a schema change, not just a new query against dimensions.
 
-On BigQuery this is the *only* mart. On PostgreSQL it sits alongside the star schema, built in parallel from staging, neither derives from the other.
+This is BigQuery's only mart. An earlier version of this table existed on PostgreSQL too, built while first learning the modeling — it's archived in `archive/` now that the star schema is the settled row-store design.
 
 ---
 
 ## Project Evolution & Roadmap
 
 ```
-PostgreSQL ELT  →  BigQuery + dbt  →  Airflow orchestration
+PostgreSQL ELT  →  BigQuery + dbt  →  Analysis layer (pandas + SQL)
    (done)              (done)              (next)
 ```
 
-- **PostgreSQL:** the original build, medallion ELT, star schema + OBT marts, idempotent upserts.
+- **PostgreSQL:** the original build, medallion ELT, star schema mart, idempotent upserts.
 - **BigQuery + dbt:** re-architected for a columnar engine: native JSON raw, dbt models, tests, lineage docs.
-- **Airflow (next):** a single DAG to orchestrate extract → dbt run → test, replacing manual runs. Kept minimal (via Docker/Astro) to stay in scope.
+- **Analysis layer (next):** extending the existing `analysis/` notebook — rolling averages in pandas alongside the equivalent SQL window functions, as a deliberate comparison of layer-appropriate tooling (pandas for ad hoc analysis vs. SQL for reusable warehouse logic).
 
 **Other improvements on the list:**
 
-- **Incremental staging:** staging currently re-processes the full raw table each run; scoping to new rows would cut redundant work.
+- **dbt depth:** incremental models, basic macros, deeper use of `dbt docs`.
 - **Expanded data-quality checks:** row-count reconciliation and rate-bound checks between layers.
 - **`pytest`:** coverage for the Python extract/load functions.
+
+**Deliberately deferred:** orchestration (Airflow/Cloud Composer). At this pipeline's scale — one daily extract, one dbt run — manual execution isn't a reliability problem worth solving yet; adding a scheduler here would be complexity without a corresponding need.
 
 ---
 
@@ -233,15 +239,18 @@ PostgreSQL ELT  →  BigQuery + dbt  →  Airflow orchestration
 ```
 fx-elt-pipeline/
 ├── sql/                          # PostgreSQL pipeline
-│   ├── ddl/schema.sql
+│   ├── ddl/
+│   │   ├── schema.sql            # fact + dims + constraints
+│   │   └── views.sql             # mart.vw_fx_metrics (serving view for DA)
 │   ├── seed/                     # dim_date, dim_currency
-│   └── transform/                # stg, fx_daily, fact_exchange_rate
+│   └── transform/                # stg, fact_exchange_rate
 ├── currency_dbt/                 # BigQuery + dbt project
 │   ├── models/
 │   │   ├── staging/
 │   │   └── marts/                # fx_daily + _schema.yml (tests)
 │   ├── dbt_project.yml
 │   └── packages.yml
+├── archive/                      # fx_daily.sql — early PG OBT, superseded by star schema
 ├── docs/                         # lineage screenshot, diagrams
 ├── init.sql                      # Postgres orchestrator (\i ddl + seed)
 ├── main.py                       # extract + load + run transforms
