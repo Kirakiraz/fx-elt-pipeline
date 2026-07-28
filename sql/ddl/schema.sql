@@ -34,27 +34,7 @@ CREATE TABLE IF NOT EXISTS staging.stg_exchange_rate (
 
 
 -- ============================================================
--- MART LAYER (1): Denormalized OBT — analytics-ready, BI-friendly
--- One wide table with pre-computed window-function metrics.
--- Fast to query (no joins); rigid schema.
--- ============================================================
-CREATE TABLE IF NOT EXISTS mart.fx_daily (
-    source_date DATE NOT NULL,
-    base_currency CHAR(3) NOT NULL,
-    target_currency CHAR(3) NOT NULL,
-    rate NUMERIC(12, 6) NOT NULL,
-    prev_rate NUMERIC(12, 6),
-    daily_change_pct NUMERIC(8, 4),
-    ma_7d NUMERIC(12, 6),
-    ma_30d NUMERIC(12, 6),
-    volatility_30d NUMERIC(12, 6),
-    refreshed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (source_date, base_currency, target_currency)
-);
-
-
--- ============================================================
--- MART LAYER (2): Star schema — dimensional model
+-- MART LAYER: Star schema — dimensional model
 -- fact_exchange_rate (raw measure) + dim_date / dim_currency.
 -- Flexible slicing; parallel to fx_daily by design (both from staging).
 -- dim_currency uses natural key (ISO 4217 code) — immutable, single-source.
