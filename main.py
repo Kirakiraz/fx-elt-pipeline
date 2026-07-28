@@ -7,14 +7,31 @@ from datetime import datetime
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 # ============================================================
 # Config
 # ============================================================
+
 load_dotenv()
 
+ENV_VAR = ['DB_USER', 'DB_PASSWORD', 'DB_HOST', 'DB_PORT', 'DB_NAME']
+MISSING_VAR = []
+for var in ENV_VAR:
+    value = os.getenv(var)
+    if not value or not value.strip():
+        MISSING_VAR.append(var)
+
+if MISSING_VAR:
+    raise ValueError(
+        f"Missing or blank env variables: {', '.join(MISSING_VAR)}")
+
+# ------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -22,19 +39,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ------------------------------------------------------------
+# Database
+# ------------------------------------------------------------
 DB_URL = (
     f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
     f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 )
+SQL_DIR = Path(__file__).parent / "sql"
 
+# ------------------------------------------------------------
+# HTTP session — retry on transient errors only (5xx/429)
+# ------------------------------------------------------------
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+)
+session = requests.Session()
+adapter = HTTPAdapter(max_retries=retry_strategy)
+session.mount("http://", adapter)
+session.mount("https://", adapter)
+
+# ------------------------------------------------------------
+# API
+# ------------------------------------------------------------
 API_BASE = "https://api.frankfurter.dev/v2"
 SOURCE_NAME = "frankfurter"
-SQL_DIR = Path(__file__).parent / "sql"
+
 
 # ============================================================
 # Main: orchestrate the ELT flow
 # ============================================================
-
 
 def main():
     engine = create_engine(DB_URL)
@@ -50,14 +86,11 @@ def main():
         transform_to_staging(engine)
         logger.info("✓ Staging complete")
 
-        transform_to_fx_daily(engine)
-        logger.info("✓ Mart: fx_daily (OBT) upsert complete")
-
         transform_to_fact(engine)
         logger.info("✓ Mart: fact_exchange_rate (star) upsert complete")
 
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.exception("Pipeline failed")
         sys.exit(1)
     finally:
         engine.dispose()
@@ -100,11 +133,12 @@ def fetch_fx_data(start_date: str) -> list[dict[str, Any]]:
     }
 
     logger.info(f"Fetching from {url}")
-    response = requests.get(url, params=params, timeout=10)
+    response = session.get(url, params=params, timeout=10)
     response.raise_for_status()
 
     payload = response.json()
     logger.info(f"Got {len(payload)} records")
+
     return payload
 
 # ============================================================
@@ -143,20 +177,6 @@ def transform_to_staging(engine) -> None:
         result = conn.execute(text(staging_sql))
         conn.commit()
     logger.info(f"staging upsert done ({result.rowcount} rows affected)")
-
-# ============================================================
-# Transform: staging → mart.fx_daily (denormalized OBT, window-function metrics)
-# ============================================================
-
-
-def transform_to_fx_daily(engine) -> None:
-    with open(SQL_DIR / "transform" / "fx_daily.sql", "r", encoding="utf-8") as f:
-        fx_daily_sql = f.read()
-
-    with engine.connect() as conn:
-        result = conn.execute(text(fx_daily_sql))
-        conn.commit()
-    logger.info(f"fx_daily upsert done ({result.rowcount} rows affected)")
 
 # ============================================================
 # Transform: staging → mart.fact_exchange_rate (star schema fact, raw rate only)
