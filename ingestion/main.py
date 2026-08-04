@@ -3,9 +3,12 @@ import logging
 
 from watermark import get_last_loaded_postgres_date
 from db import get_engine
+from bq import get_bq_client
 from load_postgres import load_to_raw
 from extract import fetch_fx_data
 from transform_postgres import transform_to_staging, transform_to_fact
+from watermark import get_last_loaded_postgres_date, get_last_loaded_bigquery_id
+from sync_bigquery import sync_to_bigquery
 
 # ------------------------------------------------------------
 # Logging
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     engine = get_engine()
+    bq_client = get_bq_client()
 
     try:
         start_date = get_last_loaded_postgres_date(engine)
@@ -38,6 +42,10 @@ def main():
 
         transform_to_fact(engine)
         logger.info("✓ Mart: fact_exchange_rate upsert complete")
+
+        last_synced_id = get_last_loaded_bigquery_id(bq_client)
+        sync_to_bigquery(engine, bq_client, last_synced_id)
+        logger.info("✓ BigQuery sync complete")
 
     except Exception:
         logger.exception("Pipeline failed")

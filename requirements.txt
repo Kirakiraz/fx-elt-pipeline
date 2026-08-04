@@ -3,3 +3,4 @@ requests==2.34.2
 SQLAlchemy==2.0.50
 psycopg2-binary==2.9.12
 dbt-bigquery==1.11.3
+google-cloud-bigquery==3.42.1
