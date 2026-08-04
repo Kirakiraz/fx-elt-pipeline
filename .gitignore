@@ -10,4 +10,4 @@ venv/
 logs/
 # data dumps
 fx_daily.csv
-raw.jsonl
+data/raw.jsonl
