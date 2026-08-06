@@ -12,7 +12,7 @@ CREATE SCHEMA IF NOT EXISTS mart;
 CREATE TABLE IF NOT EXISTS raw.api_response (
     id SERIAL PRIMARY KEY,
     fetched_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    source TEXT NOT NULL DEFAULT 'frankfurter',
+    source TEXT NOT NULL,
     payload JSONB NOT NULL
 );
 
