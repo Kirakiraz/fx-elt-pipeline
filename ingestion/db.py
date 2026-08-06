@@ -1,12 +1,14 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
+
 
 # ------------------------------------------------------------
 # Config
 # ------------------------------------------------------------
-
-load_dotenv()
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(ENV_PATH)
 
 ENV_VAR = ['DB_USER', 'DB_PASSWORD', 'DB_HOST', 'DB_PORT', 'DB_NAME']
 MISSING_VAR = []
