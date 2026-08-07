@@ -1,7 +1,6 @@
 import sys
 import logging
 
-from watermark import get_last_loaded_postgres_date
 from db import get_engine
 from bq import get_bq_client
 from load_postgres import load_to_raw
