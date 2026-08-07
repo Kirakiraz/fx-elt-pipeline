@@ -1,15 +1,16 @@
 import json
 import logging
 from pathlib import Path
+from sqlalchemy import text
 
 from google.cloud import bigquery
-from sqlalchemy import text
+from bq import RAW_TABLE_ID
+
 
 logger = logging.getLogger(__name__)
 
 # transient staging file — overwritten each run, must stay in .gitignore
 OUTPUT_PATH = Path(__file__).resolve().parent.parent / "data" / "raw.jsonl"
-TABLE_ID = "currency-elt.fx_dataset.raw_api_response"
 
 
 def sync_to_bigquery(engine, bq_client, last_synced_id) -> None:
@@ -45,10 +46,16 @@ def sync_to_bigquery(engine, bq_client, last_synced_id) -> None:
     job_config = bigquery.LoadJobConfig(
         source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
         write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        schema=[
+            bigquery.SchemaField("id", "INTEGER"),
+            bigquery.SchemaField("fetched_at", "TIMESTAMP"),
+            bigquery.SchemaField("source", "STRING"),
+            bigquery.SchemaField("payload", "JSON"),
+        ],
     )
     with open(OUTPUT_PATH, "rb") as f:
         load_job = bq_client.load_table_from_file(
-            f, TABLE_ID, job_config=job_config)
+            f, RAW_TABLE_ID, job_config=job_config)
     load_job.result()  # block until done; raises on failure (load job is atomic, all-or-nothing)
 
     logger.info(
