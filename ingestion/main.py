@@ -33,8 +33,9 @@ def main():
         logger.info(f"Last loaded date found in DB: {start_date}")
 
         payload = fetch_fx_data(start_date)
-        load_to_raw(payload, engine)
-        logger.info("✓ Raw load done")
+        if payload:
+            load_to_raw(payload, engine)
+            logger.info("✓ Raw load done")
 
         transform_to_staging(engine)
         logger.info("✓ Staging complete")
