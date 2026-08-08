@@ -10,7 +10,7 @@ profile: 'currency_dbt'
 
 # These configurations specify where dbt should look for different types of files.
 # The `model-paths` config, for example, states that models in this project can be
-# found in the "models/" directory. You probably won't need to change these!
+# found in the "models/" directory.
 model-paths: ["models"]
 analysis-paths: ["analyses"]
 test-paths: ["tests"]
@@ -25,10 +25,6 @@ clean-targets:         # directories to be removed by `dbt clean`
 
 # Configuring models
 # Full documentation: https://docs.getdbt.com/docs/configuring-models
-
-# In this example config, we tell dbt to build all models in the example/
-# directory as views. These settings can be overridden in the individual model
-# files using the `{{ config(...) }}` macro.
 models:
   currency_dbt:
     staging:
