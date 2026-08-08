@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: stg_exchange_rate
+    description: "deduped one row per date × base × target, validity-checked before mart"
+    columns:
+      - name: rate
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: false
+      - name: target_currency
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['THB', 'JPY', 'EUR', 'GBP', 'SGD']
+      - name: source_date
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: <= current_date()
+            
